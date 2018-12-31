@@ -1,18 +1,8 @@
 模块中//开头为注释
 注释为//开头
-关键字: destAddr method hdr() uri url dst_ip src_ip match_all:   不区分大小写
-hdr() uri url string为正则表达式匹配
-[destAddr = ip:port]，转发的地址，每个模块只能有一个，0开头则使用原始目标地址
-[method [!]= method]，匹配HTTP请求方法
-[string [!]= regex_string]，连接中的字符串
-[hdr(key) [!]= value]，key为头域，vakue为头域的值
-[uri [!]= uri_regex_string]，请求头中的uri，如果请求行为CONNECT saomeng.club:443 HTTP/1.1则uri为saomeng.club:443
-[url [!]= url_regex_string]，请求头中的url
-[match_all: hdr() | string | uri | url | src_ip | dst_ip = value] ，match_all后面接一个匹配规则，表示前面的规则必须先匹配match_all中设置的规则才会产生匹配
-
-例子：
 
 global模块为全局配置，必须包含
+    关键字(不区分大小写): listen destAddr procs uid pid_path timeout
 global {
     //监听地址
     listen = 0.0.0.0:80
@@ -27,13 +17,29 @@ global {
     //uid = 3004
     
     //将程序的pid写入文件
-    //pid_path = portForward.pid;
+    //pid_path = portForward.pid
+    
+    //超时时间，单位：秒，默认不超时
+    timeout = 60
 }
+
+自定义模块:
+    关键字(不区分大小写): destAddr timeout method hdr() uri url dst_ip src_ip match_all:
+    hdr() uri url string为正则表达式匹配
+    [destAddr = ip:port]，转发的地址，每个模块只能有一个，0开头则使用原始目标地址
+    [timeout = 60]，该模块超时时间，每个模块只能有一个，单位：秒，默认35秒
+    [method [!]= method]，匹配HTTP请求方法
+    [string [!]= regex_string]，连接中的字符串
+    [hdr(key) [!]= value]_regex_string，key为头域，vakue为头域的值
+    [uri [!]= uri_regex_string]，请求头中的uri，如果请求行为CONNECT saomeng.club:443 HTTP/1.1则uri为saomeng.club:443
+    [url [!]= url_regex_string]，请求头中的url
+    [match_all: hdr() | string | uri | url | src_ip | dst_ip = value] ，match_all后面接一个匹配规则，表示前面的规则必须先匹配match_all中设置的规则才会产生匹配
 
 转发到服务器的ssr
 ssr {
     //转发地址
     destAddr = 127.0.0.1:1080
+    
     //请求头中DNT头的值为1转发到127.0.0.1:1080
     hdr(DNT) = 1
     
@@ -47,6 +53,9 @@ ssr {
 转发到服务器的httpDNS
 httpdns {
     destAddr = 127.0.0.1:5353
+    
+    //设置超时为20秒
+    timeout = 20
     
     //此处的?在正则表达式中有特殊含义  因此匹配普通的?要\?
     uri = ^/d\?dn=

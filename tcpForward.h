@@ -1,8 +1,6 @@
 #ifndef PORT_FORWARD_H
 #define PORT_FORWARD_H
 
-#define DEFAULT_TIMEOUT 35 * 1000
-
 struct clientConn {
     struct sockaddr_in srcAddr, dstAddr;
     char *clientFirstData;

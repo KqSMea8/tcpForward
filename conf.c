@@ -53,16 +53,21 @@ static int addAcl(char *line, acl_module_t *acl) {
     struct acl_child *aclChi;
     char *key, *value, *p;
     
+    value = strchr(line, '=');
+    if (!value)
+        goto error;
     if (!strncasecmp(line, "destAddr", 8)) {
         char *ip, *port;
-        ip = strchr(line, '=');
-        if (!ip || (ip = skipBlank(ip+1)) == NULL || (port = strchr(ip, ':')) == NULL)
+
+        if ((ip = skipBlank(value+1)) == NULL || (port = strchr(ip, ':')) == NULL)
             goto error;
         *port++ = '\0';
         acl->dstAddr.sin_addr.s_addr = inet_addr(ip);
         acl->dstAddr.sin_port = htons(atoi(port));
         acl->dstAddr.sin_family = AF_INET;
     } else if (!strncasecmp(line, "timeout", 7)) {
+        if ((value = skipBlank(value+1)) == NULL)
+            goto error;
         acl->timeout_seconds = atoi(value) * 1000;
     } else {
         aclChi = (struct acl_child *)calloc(sizeof(struct acl_child), 1);
@@ -77,9 +82,6 @@ static int addAcl(char *line, acl_module_t *acl) {
                 goto error;
             aclChi->match_all = 1;
         }
-        value = strchr(line, '=');
-        if (!value)
-            goto error;
         if (*(value-1) == '!')
             aclChi->negation = 1;
         if ((value = skipBlank(value+1)) == NULL)
@@ -244,7 +246,7 @@ static int parseConfig(char *buff) {
             }
             acl->next = acl_list;
             acl_list = acl;
-            acl->timeout_seconds = DEFAULT_TIMEOUT;
+            acl->timeout_seconds = -1;
         } else {
             firstRead = 0;
         }

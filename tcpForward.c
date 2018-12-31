@@ -198,7 +198,7 @@ void initializate(int argc, char **argv) {
     
     listenFd = -1;
     worker_proc = 1;
-    globalTimeout = DEFAULT_TIMEOUT;
+    globalTimeout = -1;
     pid_path = NULL;
     memset(&defDstAddr, 0, sizeof(struct sockaddr_in));
     while ((opt = getopt(argc, argv, "c:vh")) != -1) {

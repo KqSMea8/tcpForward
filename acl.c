@@ -41,10 +41,7 @@ static int http_request_header(char *request, struct http_request *http_req) {
 
     if (*http_req->url != '/' && (p = strstr(http_req->url, "//")) != NULL) {
         p = strchr(p+2, '/');
-        if (p)
-            http_req->uri = p;
-        else
-            http_req->uri = "/";
+        http_req->uri = p ? p : "/";
     } else {
         http_req->uri = http_req->url;
         //有些url是//开头
@@ -119,10 +116,7 @@ int match_acl_get_serverfd(struct clientConn *client) {
                 //case SRC_IP:
                 //case DST_IP:
                 default:
-                    if (acl_child->type == SRC_IP)
-                        ip_ptr = ((char *)&client->srcAddr)+4;
-                    else
-                        ip_ptr = ((char *)&client->dstAddr)+4;
+                    ip_ptr = (acl_child->type == SRC_IP ? ((char *)&client->srcAddr) : ((char *)&client->dstAddr)) + 4;
                     ip_reverse_ptr[0] = ip_ptr[3];
                     ip_reverse_ptr[1] = ip_ptr[2];
                     ip_reverse_ptr[2] = ip_ptr[1];
@@ -148,7 +142,5 @@ int match_acl_get_serverfd(struct clientConn *client) {
         free_http_request(&http_req);
     }
     //设置0开头的转发ip使用原始目标地址
-    if (*(((char *)dstAddrPtr)+4) == 0)
-        return connectionToDestAddr(&client->dstAddr);
-    return connectionToDestAddr(dstAddrPtr);
+    return *(((char *)dstAddrPtr)+4) == 0 ? connectionToDestAddr(&client->dstAddr) : connectionToDestAddr(dstAddrPtr);
 }
