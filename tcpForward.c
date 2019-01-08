@@ -13,16 +13,22 @@
 #include <poll.h>
 #include <signal.h>
 #include "tcpForward.h"
-#include "acl.h"
+#include "limitSpeed.h"
 #include "conf.h"
 
-#define VERSION_MSG "tcp Forward(1.0):\nAuthor: CuteBi\nE-mail: 915445800@qq.com\n"
+#define VERSION_MSG "tcp Forward(2.0):\nAuthor: CuteBi\nE-mail: 915445800@qq.com\n"
 #define BUFFER_SIZE 4096
+#define DEFAULT_THREAD_POOL_SIZE 30
+
 
 struct sockaddr_in defDstAddr;
+static struct clientConn publicConn;  //主线程设置该变量，子线程复制
+static pthread_mutex_t thMutex;
+static pthread_cond_t thCond;
+static int *thPool_isBusy;  //线程执行繁忙值为1，空闲值为0
 char *pid_path;
-time_t globalTimeout;
-int listenFd, worker_proc;
+int listenFd, worker_proc, thread_pool_size, isUseLimitSpeed /* 判断是否使用限制网速功能 */;
+acl_module_t globalAcl;
 
 void usage() {
     puts(VERSION_MSG
@@ -84,14 +90,21 @@ static int read_first_data(struct clientConn *client) {
         client->clientFirstDataLen += read_len;
         client->clientFirstData[client->clientFirstDataLen] = '\0';
     } while (is_http_request(client->clientFirstData) && strstr(client->clientFirstData, "\n\r\n") == NULL);
-   
+
    return 0;
 }
 
-int forwardData(int fromfd, int tofd, char *buff) {
+static int forwardData(int fromfd, int tofd, char *buff, acl_module_t *matchAcl) {
     int read_len;
     
     do {
+        //达到最大流量，关闭连接
+        if (matchAcl->isUseLimitMaxData && matchAcl->maxDataSize < BUFFER_SIZE)
+           return 1;
+        if (matchAcl->maxSpeed)
+           //达到最大网速，暂停1秒再继续
+            while (matchAcl->sentDataSize + BUFFER_SIZE > matchAcl->maxSpeed)
+                sleep(1);
         read_len = recv(fromfd, buff, BUFFER_SIZE, MSG_DONTWAIT);
         /* 判断是否关闭连接 */
         if (read_len <= 0) {
@@ -101,64 +114,127 @@ int forwardData(int fromfd, int tofd, char *buff) {
         }
         if (write(tofd, buff, read_len) != read_len)
             return 1;
+        matchAcl->sentDataSize += read_len;
+        matchAcl->maxDataSize -= read_len;
     } while (read_len == BUFFER_SIZE);
     
     return 0;
 }
 
-void *new_connection(void *ptr) {
+void *new_connection(void *nullPtr) {
     char buff[BUFFER_SIZE];
     struct pollfd pfds[2];
-    struct clientConn *client;
+    struct clientConn client;
+    acl_module_t *matchAcl;
     
-    client = (struct clientConn *)ptr;
-    client->clientFirstData = NULL;
-    client->clientFirstDataLen = 0;
-    if (read_first_data(client) == 0 && (client->serverfd = match_acl_get_serverfd(client)) > -1 && write(client->serverfd, client->clientFirstData, client->clientFirstDataLen) == client->clientFirstDataLen) {
-        pfds[0].fd = client->clientfd;
-        pfds[1].fd = client->serverfd;
-        pfds[0].events = pfds[1].events = POLLIN;
-        while (poll(pfds, 2, client->timeout_seconds) > 0) {
-            if (pfds[0].revents & POLLIN) {
-                if (forwardData(client->clientfd, client->serverfd, buff) != 0)
-                    break;
-            }
-            if (pfds[1].revents & POLLIN) {
-                if (forwardData(client->serverfd, client->clientfd, buff) != 0)
-                    break;
+    memcpy(&client, &publicConn, sizeof(struct clientConn));
+    publicConn.clientfd = -1;  //表示已复制数据，可以接收新客户端了
+    if (read_first_data(&client) == 0 && match_acl_setServer(&client, &matchAcl) == 0) {
+        if ((matchAcl->isUseLimitMaxData && matchAcl->maxDataSize >= client.clientFirstDataLen) || matchAcl->isUseLimitMaxData == 0) {
+            /* 发送第一次读取到的数据 */
+            if (matchAcl->maxSpeed)
+               //达到最大网速，暂停1秒再继续
+                while (matchAcl->sentDataSize + client.clientFirstDataLen > matchAcl->maxSpeed)
+                    sleep(1);
+            if (write(client.serverfd, client.clientFirstData, client.clientFirstDataLen) == client.clientFirstDataLen) {
+                /* 开始转发数据 */
+                pfds[0].fd = client.clientfd;
+                pfds[1].fd = client.serverfd;
+                pfds[0].events = pfds[1].events = POLLIN;
+                while (poll(pfds, 2, matchAcl->timeout_seconds) > 0) {
+                    if (pfds[0].revents & POLLIN) {
+                        if (forwardData(client.clientfd, client.serverfd, buff, matchAcl) != 0)
+                            break;
+                    }
+                    if (pfds[1].revents & POLLIN) {
+                        if (forwardData(client.serverfd, client.clientfd, buff, matchAcl) != 0)
+                            break;
+                    }
+                }
             }
         }
     }
 
-    close(client->clientfd);
-    close(client->serverfd);
-    free(client->clientFirstData);
-    free(client);
+    close(client.clientfd);
+    close(client.serverfd);
+    free(client.clientFirstData);
+    return NULL;
+}
+
+static int accept_client() {
+    static socklen_t addr_len = sizeof(struct sockaddr_in);
+    
+    publicConn.clientfd = accept(listenFd, (struct sockaddr *)&publicConn.srcAddr, &addr_len);
+    if (publicConn.clientfd < 0) {
+        perror("accept()");
+        return 1;
+    }
+    getsockopt(publicConn.clientfd, SOL_IP, SO_ORIGINAL_DST, &publicConn.dstAddr, &addr_len);
+    
+    return 0;
+}
+
+void *pool_wait_task(void *intPtr) {
+    int *isBusy;
+
+    isBusy = (int *)intPtr;
+    while (1) {
+        pthread_cond_wait(&thCond, &thMutex);
+        pthread_mutex_unlock(&thMutex);  //解锁让其他线程并发
+        *isBusy = 1;
+        new_connection(NULL);
+        *isBusy = 0;
+    }
+
     return NULL;
 }
 
 void server_start() {
-    struct clientConn *client;
-    socklen_t addr_len = sizeof(struct sockaddr_in);
     pthread_t th_id;
     pthread_attr_t attr;
+    int i;
     
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (isUseLimitSpeed)
+        pthread_create(&th_id, &attr, &speedReset, NULL);
+    /* 创建线程池 */
+    thPool_isBusy = (int *)calloc(thread_pool_size, sizeof(int));
+    if (!thPool_isBusy) {
+        perror("calloc()");
+        return;
+    }
+    pthread_mutex_init(&thMutex, NULL);
+    pthread_cond_init(&thCond, NULL);
+    for (i = 0; i < thread_pool_size; i++) {
+        pthread_create(&th_id, &attr, &pool_wait_task, (void *)(thPool_isBusy + i));
+    }
+    /* 开始监控新客户端 */
     while (1) {
-        client = (struct clientConn *)malloc(sizeof(struct clientConn));
-        if (client == NULL)
-            continue;
-        client->serverfd = -1;
-        wait_new_connection:
-        client->clientfd = accept(listenFd, (struct sockaddr *)&client->srcAddr, &addr_len);
-        if (client->clientfd < 0) {
-            perror("accept()");
+        if (accept_client() != 0) {
             sleep(3);
-            goto wait_new_connection;
+            continue;
         }
-        getsockopt(client->clientfd, SOL_IP, SO_ORIGINAL_DST, &client->dstAddr, &addr_len);
-        pthread_create(&th_id, &attr, &new_connection, (void *)client);
+        //线程池中有空闲线程则运行线程池中的线程
+        for (i = 0; i < thread_pool_size; i++) {
+            if (thPool_isBusy[i] == 0) {
+                pthread_cond_signal(&thCond);
+                break;
+            }
+        }
+        /* 线程池中无空闲线程，创建新线程处理 */
+        if (i == thread_pool_size) {
+            if (pthread_create(&th_id, &attr, &new_connection, NULL) != 0) {
+                close(publicConn.clientfd);
+                continue;
+            }
+        }
+        /* 等待处理线程复制数据 */
+        int j = 0;
+        do {
+            usleep(10);  //暂停10微秒给线程复制数据的时间
+            j++;
+        } while (publicConn.clientfd != -1);
     }
 }
 
@@ -195,12 +271,18 @@ int create_listen(char *ip, int port) {
 
 void initializate(int argc, char **argv) {
     int opt;
-    
+
+    isUseLimitSpeed = 0;
     listenFd = -1;
     worker_proc = 1;
-    globalTimeout = -1;
+    thread_pool_size = DEFAULT_THREAD_POOL_SIZE;
     pid_path = NULL;
+    publicConn.serverfd = -1;
+    publicConn.clientFirstData = NULL;
+    publicConn.clientFirstDataLen = 0;
+    memset(&globalAcl, 0, sizeof(acl_module_t));
     memset(&defDstAddr, 0, sizeof(struct sockaddr_in));
+    globalAcl.maxDataSize = globalAcl.timeout_seconds = -1;  //默认-1，不限制流量，不超时
     while ((opt = getopt(argc, argv, "c:vh")) != -1) {
         switch (opt) {
             case 'c':
@@ -242,7 +324,11 @@ void initializate(int argc, char **argv) {
 int main(int argc, char **argv)
 {
     initializate(argc, argv);
+    #ifdef DEBUG
     if (daemon(1, 1)) {
+    #else
+    if (daemon(1, 0)) {
+    #endif
         perror("daemon");
         return 1;
     }

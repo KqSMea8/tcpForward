@@ -53,7 +53,7 @@ static int http_request_header(char *request, struct http_request *http_req) {
     return 0;
 }
 
-int match_acl_get_serverfd(struct clientConn *client) {
+int match_acl_setServer(struct clientConn *client, acl_module_t **setMatchAcl) {
     regmatch_t pm[10];
     struct http_request http_req;
     acl_module_t *acl;
@@ -67,7 +67,7 @@ int match_acl_get_serverfd(struct clientConn *client) {
     match_ret = 1;
     ip_reverse_ptr = (char *)&ip_reverse;
     dstAddrPtr = &defDstAddr;
-    client->timeout_seconds = globalTimeout;
+    *setMatchAcl = &globalAcl;
     is_http_req = is_http_request(client->clientFirstData);
     if (is_http_req && http_request_header(client->clientFirstData, &http_req) != 0)
         return -1;
@@ -127,7 +127,7 @@ int match_acl_get_serverfd(struct clientConn *client) {
             }
             if ((match_ret == 0 && acl_child->negation == 0) || (match_ret != 0 && acl_child->negation == 1)) {
                 if (acl_child->match_all == 0) {
-                    client->timeout_seconds = acl->timeout_seconds;
+                    *setMatchAcl = acl;
                     dstAddrPtr = &acl->dstAddr;
                     goto matchEnd;
                 }
@@ -142,5 +142,6 @@ int match_acl_get_serverfd(struct clientConn *client) {
         free_http_request(&http_req);
     }
     //设置0开头的转发ip使用原始目标地址
-    return *(((char *)dstAddrPtr)+4) == 0 ? connectionToDestAddr(&client->dstAddr) : connectionToDestAddr(dstAddrPtr);
+    client->serverfd = *(((char *)dstAddrPtr)+4) == 0 ? connectionToDestAddr(&client->dstAddr) : connectionToDestAddr(dstAddrPtr);
+    return client->serverfd == -1 ? 1 : 0;
 }

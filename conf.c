@@ -8,39 +8,22 @@
 #include "tcpForward.h"
 #include "acl.h"
 
+/* 字符串预处理，设置转义字符 */
 void string_pretreatment(char *str) {
-    char *p;
-    
-    for (p = strstr(str, "\\r"); p; p = strstr(p, "\\r")) {
-        *p = '\r';
-        memmove(p+1, p+2, strlen(p+2));
-    }
-    for (p = strstr(str, "\\n"); p; p = strstr(p, "\\n")) {
-        *p = '\n';
-        memmove(p+1, p+2, strlen(p+2));
-    }
-    for (p = strstr(str, "\\v"); p; p = strstr(p, "\\v")) {
-        *p = '\v';
-        memmove(p+1, p+2, strlen(p+2));
-    }
-    for (p = strstr(str, "\\f"); p; p = strstr(p, "\\f")) {
-        *p = '\f';
-        memmove(p+1, p+2, strlen(p+2));
-    }
-    for (p = strstr(str, "\\b"); p; p = strstr(p, "\\b")) {
-        *p = '\b';
-        memmove(p+1, p+2, strlen(p+2));
-    }
-    for (p = strstr(str, "\\t"); p; p = strstr(p, "\\t")) {
-        *p = '\t';
-        memmove(p+1, p+2, strlen(p+2));
-    }
-    for (p = strstr(str, "\\a"); p; p = strstr(p, "\\a")) {
-        *p = '\a';
-        memmove(p+1, p+2, strlen(p+2));
+    char *p,
+        *ori_strs[] = {"\\r", "\\n", "\\b", "\\v", "\\f", "\\t", "\\a", "\\b"},
+        to_chrs[] = {'\r', '\n', '\b', '\v', '\f', '\t', '\a', '\b'};
+    int i;
+
+    for (i = 0; i < sizeof(to_chrs); i++) {
+        for (p = strstr(str, ori_strs[i]); p; p = strstr(p, ori_strs[i])) {
+            *p = to_chrs[i];
+            memmove(p+1, p+2, strlen(p+2));
+        }
     }
 }
 
+/* 跳过空白字符 */
 char *skipBlank(char *str) {
     while (*str == ' ' || *str == '\t' || *str == '\r' || *str == '\n')
         str++;
@@ -49,6 +32,32 @@ char *skipBlank(char *str) {
     return str;
 }
 
+/* 字符串转换为网络传输单位 */
+static long long strToNet(char *speedStr) {
+    long long speed;
+
+    speed = (unsigned long long)atoi(speedStr);
+    switch (*(speedStr + strlen(speedStr) - 1)) {
+        case 'k':
+        case 'K':
+            speed <<= 10;
+        break;
+
+        case 'g':
+        case 'G':
+            speed <<= 30;
+        break;
+
+        //默认单位为m
+        default:
+            speed <<= 20;
+        break;
+    }
+
+    return speed;
+}
+
+/* 添加一条acl控制规则 */
 static int addAcl(char *line, acl_module_t *acl) {
     struct acl_child *aclChi;
     char *key, *value, *p;
@@ -58,7 +67,6 @@ static int addAcl(char *line, acl_module_t *acl) {
         goto error;
     if (!strncasecmp(line, "destAddr", 8)) {
         char *ip, *port;
-
         if ((ip = skipBlank(value+1)) == NULL || (port = strchr(ip, ':')) == NULL)
             goto error;
         *port++ = '\0';
@@ -70,7 +78,7 @@ static int addAcl(char *line, acl_module_t *acl) {
             goto error;
         acl->timeout_seconds = atoi(value) * 1000;
     } else {
-        aclChi = (struct acl_child *)calloc(sizeof(struct acl_child), 1);
+        aclChi = (struct acl_child *)calloc(1, sizeof(struct acl_child));
         if (!aclChi) {
             perror("calloc()");
             return 1;
@@ -139,6 +147,12 @@ static int addAcl(char *line, acl_module_t *acl) {
                 aclChi->ip_bit_len = 32;
             }
             *line == 's' ? (aclChi->type = SRC_IP) : (aclChi->type = DST_IP);
+        } else if (!strncasecmp(line, "maxData", 7)) {
+            acl->isUseLimitMaxData = 1;
+            acl->maxDataSize = strToNet(value);
+        } else if (!strncasecmp(line, "maxSpeed", 8)) {
+            isUseLimitSpeed = 1;
+            acl->maxSpeed = strToNet(value);
         } else {
             goto error;
         }
@@ -150,6 +164,7 @@ static int addAcl(char *line, acl_module_t *acl) {
     return 1;
 }
 
+/* 读取全局模块 */
 static int readGlobal(char *line) {
     char *value;
     
@@ -187,7 +202,15 @@ static int readGlobal(char *line) {
     } else if (!strncasecmp(line, "procs", 5)) {
         worker_proc = atoi(value);
     } else if (!strncasecmp(line, "timeout", 7)) {
-        globalTimeout = atoi(value) * 1000;
+        globalAcl.timeout_seconds = atoi(value) * 1000;
+    } else if (!strncasecmp(line, "thread_pool_size", 16)) {
+        thread_pool_size = atoi(value);
+    } else if (!strncasecmp(line, "maxData", 7)) {
+        globalAcl.isUseLimitMaxData = 1;
+        globalAcl.maxDataSize = strToNet(value);
+    } else if (!strncasecmp(line, "maxSpeed", 8)) {
+        isUseLimitSpeed = 1;
+        globalAcl.maxSpeed= strToNet(value);
     } else {
         goto error;
     }
@@ -198,6 +221,7 @@ static int readGlobal(char *line) {
     return 1;
 }
 
+/* 读取模块 */
 static int readArea(char *content, acl_module_t *acl) {
     char *lineBegin, *lineEnd = NULL;
     
@@ -211,8 +235,12 @@ static int readArea(char *content, acl_module_t *acl) {
         }
         else if (*lineBegin == '}')
             return 0;
-        if ((lineEnd = strchr(lineBegin, '\n')) != NULL)
-            *lineEnd++ = '\0';  //  ++指向下一行
+        if ((lineEnd = strchr(lineBegin, '\n')) != NULL) {
+            if (*(lineEnd - 1) == ';')  //;作为一行的结束字符
+                *(lineEnd++ - 1) = '\0';  //指向下一行
+            else
+                *lineEnd++ = '\0';
+        }
         if (acl == NULL) {
             if (readGlobal(lineBegin) != 0)
                 return 0;
@@ -224,6 +252,7 @@ static int readArea(char *content, acl_module_t *acl) {
     return 0;
 }
 
+/* 解析配置文件 */
 static int parseConfig(char *buff) {
     acl_module_t *acl;
     char *p, *p0;
@@ -239,14 +268,14 @@ static int parseConfig(char *buff) {
         if ((p0 = strchr(++p, '}')) == NULL)
             return 1;
         if (firstRead == 0) {
-            acl = (acl_module_t *)calloc(sizeof(acl_module_t), 1);
+            acl = (acl_module_t *)malloc(sizeof(acl_module_t));
             if (!acl) {
                 perror("calloc()");
                 return 1;
             }
             acl->next = acl_list;
             acl_list = acl;
-            acl->timeout_seconds = -1;
+            memcpy(acl, &globalAcl, sizeof(acl_module_t));
         } else {
             firstRead = 0;
         }
@@ -257,6 +286,7 @@ static int parseConfig(char *buff) {
     return 0;
 }
 
+/* 读取配置文件并解析 */
 int readConfig(char *path) {
     char *buff;
     FILE *file;

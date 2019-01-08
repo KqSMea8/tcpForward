@@ -5,7 +5,6 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <regex.h>
-#include "tcpForward.h"
 
 #define STRING 0
 #define URI 1
@@ -14,7 +13,6 @@
 #define HDR 4
 #define DST_IP 5
 #define SRC_IP 6
-
 
 struct acl_child {
     regex_t reg;
@@ -27,13 +25,18 @@ struct acl_child {
 
 typedef struct acl_module {
     struct sockaddr_in dstAddr;
+    unsigned long long maxSpeed,  // 最大网速
+        sentDataSize,  // 当前秒数已发送字节
+        maxDataSize;  // 最大传输流量
     struct acl_child *acl_child_list;
     struct acl_module *next;
     int listenFd;
-    time_t timeout_seconds;
+    int timeout_seconds;
+    unsigned isUseLimitMaxData :1;
 } acl_module_t;
+#include "tcpForward.h"
 
-extern int match_acl_get_serverfd(struct clientConn *client);
+extern int match_acl_setServer();
 
 extern acl_module_t *acl_list;
 

@@ -2,32 +2,44 @@
 注释为//开头
 
 global模块为全局配置，必须包含
-    关键字(不区分大小写): listen destAddr procs uid pid_path timeout
+    关键字(不区分大小写): listen destAddr procs uid pid_path timeout maxSpeed maxData
+    [thread_pool_size = number]，线程池大小，首先创建number个线程处理，当没有空闲进程再创建新线程处理，默认30个线程
+    [timeout = timeout_second]，超时时间，每个模块只能有一个，单位：秒，默认-1不超时
+    [maxSpeed = speedNumber]，单进程限制每秒最大网速，每个模块只能有一个，默认0不限速
+    [maxData = maxForwardDataNumber]，单进程限制最大传输流量，每个模块只能有一个，默认-1不限量
 global {
     //监听地址
-    listen = 0.0.0.0:80
-    
+    listen = 0.0.0.0:80;
+
     //默认转发地址，这里的ip是0开头，使用客户端的原始地址
-    destaddr = 0.0.0.0:69
-    
+    destaddr = 0.0.0.0:69;
+
     //进程数
-    //procs = 2
-    
+    //procs = 2;
+
     //运行uid
-    //uid = 3004
-    
+    //uid = 3004;
+
     //将程序的pid写入文件
-    //pid_path = portForward.pid
-    
-    //超时时间，单位：秒，默认不超时
-    timeout = 60
+    //pid_path = tcpForward.pid;
+
+    //线程池大小
+    //thread_pool_size = 35;
+
+    //默认超时时间
+    timeout = 60;
+
+    //默认每秒最大网速
+    //maxSpeed = 5M;
+
+    //默认限制最大流量
+    //maxData = 10g;
 }
 
 自定义模块:
-    关键字(不区分大小写): destAddr timeout method hdr() uri url dst_ip src_ip match_all:
+    关键字(不区分大小写): destAddr maxSpeed maxData timeout method hdr() uri url dst_ip src_ip match_all:
     hdr() uri url string为正则表达式匹配
     [destAddr = ip:port]，转发的地址，每个模块只能有一个，0开头则使用原始目标地址
-    [timeout = 60]，该模块超时时间，每个模块只能有一个，单位：秒，默认35秒
     [method [!]= method]，匹配HTTP请求方法
     [string [!]= regex_string]，连接中的字符串
     [hdr(key) [!]= value]_regex_string，key为头域，vakue为头域的值
@@ -38,50 +50,56 @@ global {
 转发到服务器的ssr
 ssr {
     //转发地址
-    destAddr = 127.0.0.1:1080
-    
+    destAddr = 127.0.0.1:1080;
+
     //请求头中DNT头的值为1转发到127.0.0.1:1080
-    hdr(DNT) = 1
-    
+    hdr(DNT) = 1;
+
     //uri以/%开头转发到127.0.0.1:1080
-    uri = ^/%
-    
+    uri = ^/%;
+
     //只有非CONNECT请求才匹配上面的规则，其他请求不转发到127.0.0.1:1080
-    match_all: method != CONNECT
+    match_all: method != CONNECT;
+
+    //限制该模块的网速为3m/s
+    maxSpeed = 3m;
 }
 
 转发到服务器的httpDNS
 httpdns {
-    destAddr = 127.0.0.1:5353
-    
+    destAddr = 127.0.0.1:5353;
+
     //设置超时为20秒
-    timeout = 20
-    
+    timeout = 20;
+
     //此处的?在正则表达式中有特殊含义  因此匹配普通的?要\?
-    uri = ^/d\?dn=
-    
+    uri = ^/d\?dn=;
+
     //只有host为dns.saomeng.club开头的请求才匹配上面的uri = ^/d\?dn=
-    match_all: hdr(host) = ^dns.saomeng.club
-    
+    match_all: hdr(host) = ^dns.saomeng.club;
+
     //host为saomeng.club:5353的请求头  不需要对比以上规则 直接转发到127.0.0.1:5353
-    hdr(host) = ^saomeng.club:5353$
+    hdr(host) = ^saomeng.club:5353$;
+
+    //限制使用流量1g
+    maxData = 1G;
 }
 
 转发到websocket的v2ray
 v2ws {
-    destAddr = 127.0.0.1:8082
-    
+    destAddr = 127.0.0.1:8082;
+
     //数据中包含websocket就转发到127.0.0.1:8082
-    string = websocket
+    string = websocket;
 }
 
 ip转发
 ipForward {
-     destAddr = 127.0.0.1:8081
-     
+     destAddr = 127.0.0.1:8081;
+
      //来自6.6开头的ip转发到127.0.0.1:8081
-     src_ip = 6.6/16
-     
+     src_ip = 6.6/16;
+
      //原始目标ip是8.8开头的ip转发到127.0.0.1:8081
-     dst_ip = 8.8/16
+     dst_ip = 8.8/16;
 }

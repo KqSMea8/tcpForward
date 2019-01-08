@@ -1,5 +1,6 @@
 OBJ := tcpForward
 CC := gcc
+STRIP := strip
 CFLAGS := -O2 -Wall -pthread
 #如果是安卓编译
 ifeq ($(ANDROID_DATA),/data)
@@ -8,9 +9,9 @@ ifeq ($(ANDROID_DATA),/data)
 endif
 
 
-all : tcpForward.o acl.o conf.o
+all : tcpForward.o acl.o conf.o limitSpeed.o
 	$(CC) $(CFLAGS) $(DEFS) -o $(OBJ) $^
-	strip $(OBJ)
+	$(STRIP) $(OBJ)
 	-chmod 777 $(OBJ) 2>&-
 
 .c.o : 
