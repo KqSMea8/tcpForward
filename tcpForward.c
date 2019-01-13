@@ -14,16 +14,15 @@
 #include <signal.h>
 #include "tcpForward.h"
 #include "limitSpeed.h"
+#include "tunnelProxy.h"
 #include "conf.h"
 
-#define VERSION_MSG "tcp Forward(2.0):\nAuthor: CuteBi\nE-mail: 915445800@qq.com\n"
+#define VERSION_MSG "tcp Forward(3.0):\nAuthor: CuteBi\nE-mail: 915445800@qq.com\n"
 #define BUFFER_SIZE 4096
 #define DEFAULT_THREAD_POOL_SIZE 30
 
-
-struct sockaddr_in defDstAddr;
 static struct clientConn publicConn;  //主线程设置该变量，子线程复制
-static pthread_mutex_t thMutex;
+static pthread_mutex_t condMutex, cpMutex;
 static pthread_cond_t thCond;
 static int *thPool_isBusy;  //线程执行繁忙值为1，空闲值为0
 char *pid_path;
@@ -37,15 +36,20 @@ void usage() {
     "    -h    \033[20G display his message\n");
 }
 
-int connectionToDestAddr(struct sockaddr_in *dst) {
+int connectToDestAddr(struct sockaddr_in *dst, struct sockaddr_in *ori_dst, int rcv_timeo_ms) {
     int fd;
-    
+
     fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0)
         return -1;
-    if (connect(fd, (struct sockaddr *)dst, sizeof(struct sockaddr_in)) != 0) {
+    //设置0开头的转发ip使用原始目标地址
+    if (connect(fd, (struct sockaddr *)(*(((char *)dst)+4) == 0 ? ori_dst : dst), sizeof(struct sockaddr_in)) != 0) {
         close(fd);
         return -1;
+    }
+    if (rcv_timeo_ms > 0) {
+        struct timeval tv = {rcv_timeo_ms / 1000, 0};
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     }
 
     return fd;
@@ -72,7 +76,7 @@ int is_http_request(char *req) {
         return 0;
 }
 
-static int read_first_data(struct clientConn *client) {
+int read_first_data(struct clientConn *client) {
     char *new_data;
     int read_len;
 
@@ -94,17 +98,26 @@ static int read_first_data(struct clientConn *client) {
    return 0;
 }
 
+int write_data(int fd, char *data, int data_len, acl_module_t *acl) {
+    //达到最大流量，关闭连接
+    if (acl->isUseLimitMaxData && acl->maxDataSize < BUFFER_SIZE)
+       return 1;
+    if (acl->maxSpeed)
+       //达到最大网速，暂停1秒再继续
+        while (acl->sentDataSize + BUFFER_SIZE > acl->maxSpeed)
+            sleep(1);
+    if (write(fd, data, data_len) != data_len)
+        return 1;
+    acl->sentDataSize += data_len;
+    acl->maxDataSize -= data_len;
+    
+    return 0;
+}
+
 static int forwardData(int fromfd, int tofd, char *buff, acl_module_t *matchAcl) {
     int read_len;
-    
+
     do {
-        //达到最大流量，关闭连接
-        if (matchAcl->isUseLimitMaxData && matchAcl->maxDataSize < BUFFER_SIZE)
-           return 1;
-        if (matchAcl->maxSpeed)
-           //达到最大网速，暂停1秒再继续
-            while (matchAcl->sentDataSize + BUFFER_SIZE > matchAcl->maxSpeed)
-                sleep(1);
         read_len = recv(fromfd, buff, BUFFER_SIZE, MSG_DONTWAIT);
         /* 判断是否关闭连接 */
         if (read_len <= 0) {
@@ -112,12 +125,10 @@ static int forwardData(int fromfd, int tofd, char *buff, acl_module_t *matchAcl)
                 return 1;
             return 0;
         }
-        if (write(tofd, buff, read_len) != read_len)
+        if (write_data(tofd, buff, read_len, matchAcl) != 0)
             return 1;
-        matchAcl->sentDataSize += read_len;
-        matchAcl->maxDataSize -= read_len;
     } while (read_len == BUFFER_SIZE);
-    
+
     return 0;
 }
 
@@ -126,35 +137,45 @@ void *new_connection(void *nullPtr) {
     struct pollfd pfds[2];
     struct clientConn client;
     acl_module_t *matchAcl;
-    
+
+    pthread_mutex_lock(&cpMutex);
     memcpy(&client, &publicConn, sizeof(struct clientConn));
-    publicConn.clientfd = -1;  //表示已复制数据，可以接收新客户端了
-    if (read_first_data(&client) == 0 && match_acl_setServer(&client, &matchAcl) == 0) {
-        if ((matchAcl->isUseLimitMaxData && matchAcl->maxDataSize >= client.clientFirstDataLen) || matchAcl->isUseLimitMaxData == 0) {
-            /* 发送第一次读取到的数据 */
-            if (matchAcl->maxSpeed)
-               //达到最大网速，暂停1秒再继续
-                while (matchAcl->sentDataSize + client.clientFirstDataLen > matchAcl->maxSpeed)
-                    sleep(1);
-            if (write(client.serverfd, client.clientFirstData, client.clientFirstDataLen) == client.clientFirstDataLen) {
-                /* 开始转发数据 */
-                pfds[0].fd = client.clientfd;
-                pfds[1].fd = client.serverfd;
-                pfds[0].events = pfds[1].events = POLLIN;
-                while (poll(pfds, 2, matchAcl->timeout_seconds) > 0) {
-                    if (pfds[0].revents & POLLIN) {
-                        if (forwardData(client.clientfd, client.serverfd, buff, matchAcl) != 0)
-                            break;
-                    }
-                    if (pfds[1].revents & POLLIN) {
-                        if (forwardData(client.serverfd, client.clientfd, buff, matchAcl) != 0)
-                            break;
-                    }
-                }
-            }
+    pthread_mutex_unlock(&cpMutex);
+    if ((matchAcl = first_match_acl_module(&client, firstMatch_acl_list, -1)) == NULL) {
+        if (read_first_data(&client) != 0)
+            goto forwardEnd;
+        matchAcl = match_acl_module(&client, acl_list, -1);
+    }
+    //连接匹配成功后的地址
+    if ((client.serverfd = connectToDestAddr(&matchAcl->dstAddr, &client.dstAddr, matchAcl->timeout_ms)) == -1)
+        goto forwardEnd;
+    //创建CONNECT隧道连接
+    if (matchAcl->tunnel_proxy && create_tunnel(&client, matchAcl) != 0)
+        goto forwardEnd;
+    //创建连接后再次匹配客户端数据
+    if ((matchAcl = reMatchAcl(&client, matchAcl)) == NULL)
+        goto forwardEnd;
+    /* 发送第一次读取到的数据 */
+    if (client.clientFirstData) {
+        if (write_data(client.serverfd, client.clientFirstData, client.clientFirstDataLen, matchAcl) != 0)
+            goto forwardEnd;
+    }
+    /* 开始转发数据 */
+    pfds[0].fd = client.clientfd;
+    pfds[1].fd = client.serverfd;
+    pfds[0].events = pfds[1].events = POLLIN;
+    while (poll(pfds, 2, matchAcl->timeout_ms) > 0) {
+        if (pfds[0].revents & POLLIN) {
+            if (forwardData(client.clientfd, client.serverfd, buff, matchAcl) != 0)
+                break;
+        }
+        if (pfds[1].revents & POLLIN) {
+            if (forwardData(client.serverfd, client.clientfd, buff, matchAcl) != 0)
+                break;
         }
     }
 
+    forwardEnd:
     close(client.clientfd);
     close(client.serverfd);
     free(client.clientFirstData);
@@ -163,14 +184,14 @@ void *new_connection(void *nullPtr) {
 
 static int accept_client() {
     static socklen_t addr_len = sizeof(struct sockaddr_in);
-    
+
     publicConn.clientfd = accept(listenFd, (struct sockaddr *)&publicConn.srcAddr, &addr_len);
     if (publicConn.clientfd < 0) {
         perror("accept()");
         return 1;
     }
     getsockopt(publicConn.clientfd, SOL_IP, SO_ORIGINAL_DST, &publicConn.dstAddr, &addr_len);
-    
+
     return 0;
 }
 
@@ -179,8 +200,8 @@ void *pool_wait_task(void *intPtr) {
 
     isBusy = (int *)intPtr;
     while (1) {
-        pthread_cond_wait(&thCond, &thMutex);
-        pthread_mutex_unlock(&thMutex);  //解锁让其他线程并发
+        pthread_cond_wait(&thCond, &condMutex);  //等待任务
+        pthread_mutex_unlock(&condMutex);  //解锁让其他线程并发
         *isBusy = 1;
         new_connection(NULL);
         *isBusy = 0;
@@ -193,7 +214,7 @@ void server_start() {
     pthread_t th_id;
     pthread_attr_t attr;
     int i;
-    
+
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     if (isUseLimitSpeed)
@@ -204,11 +225,11 @@ void server_start() {
         perror("calloc()");
         return;
     }
-    pthread_mutex_init(&thMutex, NULL);
+    pthread_mutex_init(&cpMutex, NULL);
+    pthread_mutex_init(&condMutex, NULL);
     pthread_cond_init(&thCond, NULL);
-    for (i = 0; i < thread_pool_size; i++) {
+    for (i = 0; i < thread_pool_size; i++)
         pthread_create(&th_id, &attr, &pool_wait_task, (void *)(thPool_isBusy + i));
-    }
     /* 开始监控新客户端 */
     while (1) {
         if (accept_client() != 0) {
@@ -229,12 +250,6 @@ void server_start() {
                 continue;
             }
         }
-        /* 等待处理线程复制数据 */
-        int j = 0;
-        do {
-            usleep(10);  //暂停10微秒给线程复制数据的时间
-            j++;
-        } while (publicConn.clientfd != -1);
     }
 }
 
@@ -265,11 +280,11 @@ int create_listen(char *ip, int port) {
         close(fd);
         return -1;
     }
-    
+
     return fd;
 }
 
-void initializate(int argc, char **argv) {
+static void initializate(int argc, char **argv) {
     int opt;
 
     isUseLimitSpeed = 0;
@@ -277,27 +292,25 @@ void initializate(int argc, char **argv) {
     worker_proc = 1;
     thread_pool_size = DEFAULT_THREAD_POOL_SIZE;
     pid_path = NULL;
+    memset(&publicConn, 0, sizeof(struct clientConn));
     publicConn.serverfd = -1;
-    publicConn.clientFirstData = NULL;
-    publicConn.clientFirstDataLen = 0;
     memset(&globalAcl, 0, sizeof(acl_module_t));
-    memset(&defDstAddr, 0, sizeof(struct sockaddr_in));
-    globalAcl.maxDataSize = globalAcl.timeout_seconds = -1;  //默认-1，不限制流量，不超时
+    globalAcl.maxDataSize = globalAcl.timeout_ms = -1;  //默认-1，不限制流量，不超时
     while ((opt = getopt(argc, argv, "c:vh")) != -1) {
         switch (opt) {
             case 'c':
                 if (readConfig(optarg) != 0)
                     exit(1);
             break;
-            
+
             case 'v':
                 puts(VERSION_MSG);
             exit(0);
-            
+
             case 'h':
                 usage();
             exit(0);
-            
+
             default:
                 usage();
             exit(1);
@@ -324,16 +337,12 @@ void initializate(int argc, char **argv) {
 int main(int argc, char **argv)
 {
     initializate(argc, argv);
-    #ifdef DEBUG
     if (daemon(1, 1)) {
-    #else
-    if (daemon(1, 0)) {
-    #endif
         perror("daemon");
         return 1;
     }
     server_start();
-    
+
     return 0;
 }
 

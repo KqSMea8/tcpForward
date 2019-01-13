@@ -11,10 +11,11 @@ struct clientConn {
 
 extern int create_listen(char *ip, int port);
 extern int is_http_request(char *req);
-extern int connectionToDestAddr(struct sockaddr_in *dst);
+extern int connectToDestAddr(struct sockaddr_in *dst, struct sockaddr_in *ori_dst, int rcv_timeo_ms);
+extern int read_first_data(struct clientConn *client);
+extern int write_data(int fd, char *data, int data_len, acl_module_t *acl);
 
 extern int listenFd, worker_proc, isUseLimitSpeed, thread_pool_size;
-extern struct sockaddr_in defDstAddr;
 extern char *pid_path;
 extern acl_module_t globalAcl;
 

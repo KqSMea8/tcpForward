@@ -7,6 +7,8 @@ void *speedReset(void *nullPtr) {
         globalAcl.sentDataSize = 0;
         for (acl_ptr = acl_list; acl_ptr; acl_ptr = acl_ptr->next)
             acl_ptr->sentDataSize = 0;
+        for (acl_ptr = firstMatch_acl_list; acl_ptr; acl_ptr = acl_ptr->next)
+            acl_ptr->sentDataSize = 0;
         sleep(1);
     }
 }

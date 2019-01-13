@@ -9,7 +9,7 @@ ifeq ($(ANDROID_DATA),/data)
 endif
 
 
-all : tcpForward.o acl.o conf.o limitSpeed.o
+all : tcpForward.o acl.o conf.o limitSpeed.o tunnelProxy.o
 	$(CC) $(CFLAGS) $(DEFS) -o $(OBJ) $^
 	$(STRIP) $(OBJ)
 	-chmod 777 $(OBJ) 2>&-

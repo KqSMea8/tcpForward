@@ -1,12 +1,15 @@
 模块中//开头为注释
 注释为//开头
 
-global模块为全局配置，必须包含
-    关键字(不区分大小写): listen destAddr procs uid pid_path timeout maxSpeed maxData
-    [thread_pool_size = number]，线程池大小，首先创建number个线程处理，当没有空闲进程再创建新线程处理，默认30个线程
+global模块为全局配置
+    关键字(不区分大小写): listen procs uid pid_path timeout    [thread_pool_size = number]，线程池大小，首先创建number个线程等待处理客户端，当没有空闲线程再创建新线程处理，默认30个线程
     [timeout = timeout_second]，超时时间，每个模块只能有一个，单位：秒，默认-1不超时
+
+    设置各模块的默认配置: destAddr maxSpeed maxData
+    [destAddr = ip:port]，转发的地址，每个模块只能有一个，0开头则使用原始目标地址
     [maxSpeed = speedNumber]，单进程限制每秒最大网速，每个模块只能有一个，默认0不限速
     [maxData = maxForwardDataNumber]，单进程限制最大传输流量，每个模块只能有一个，默认-1不限量
+    [tunnel_proxy = on]，使用隧道代理(CONNECT)
 global {
     //监听地址
     listen = 0.0.0.0:80;
@@ -34,18 +37,28 @@ global {
 
     //默认限制最大流量
     //maxData = 10g;
+    
+    //默认使用CONNECT代理
+    //tunnel_proxy =on;
 }
 
 自定义模块:
-    关键字(不区分大小写): destAddr maxSpeed maxData timeout method hdr() uri url dst_ip src_ip match_all:
-    hdr() uri url string为正则表达式匹配
-    [destAddr = ip:port]，转发的地址，每个模块只能有一个，0开头则使用原始目标地址
+    配置关键字(不区分大小写): destAddr tunnel_proxy include_module maxSpeed maxData matchMode timeout reMatch
+    [reMatch = module_name]，重新匹配一次module_name模块里的规则，匹配成功后使用重新匹配的配置，否则不改变已成功匹配的模块配置，需要module_name模块已经创建
+    [matchMode = [firstMatch/only_reMatch]，firstMatch: 读取客户端前先进行匹配(有些连接是先获取服务端数据才能上网)，只支持src_ip dst_ip dst_port match_all:语法；only_reMatch: 只有在其他模块指定reMatch时匹配，没有模块指定则不进行匹配
+    [include_module = module_name]，跳转到module_name模块的规则进行匹配，需要module_name模块已经创建
+
+    规则关键字(不区分大小写): method hdr() uri url dst_ip src_ip dst_port match_all:
+    匹配顺序从下往上，hdr() uri url string为正则表达式匹配
     [method [!]= method]，匹配HTTP请求方法
-    [string [!]= regex_string]，连接中的字符串
+    [string [!]= regex_string]，客户端数据中的字符串
     [hdr(key) [!]= value]_regex_string，key为头域，vakue为头域的值
     [uri [!]= uri_regex_string]，请求头中的uri，如果请求行为CONNECT saomeng.club:443 HTTP/1.1则uri为saomeng.club:443
     [url [!]= url_regex_string]，请求头中的url
-    [match_all: hdr() | string | uri | url | src_ip | dst_ip = value] ，match_all后面接一个匹配规则，表示前面的规则必须先匹配match_all中设置的规则才会产生匹配
+    [dst_ip [!]= ip]，客户端的原始目标ip，一般用于本机主机通过iptables重定向
+    [dst_port [!]= port[:port]]，客户端的原始目标端口，连续端口用:连接，一般用于本机主机通过iptables重定向
+    [src_ip [!]= ip]，客户端的来源ip，一般用于云主机
+    [match_all: hdr() | string | uri | url | src_ip | dst_ip | dst_port = value] ，match_all后面接一个匹配规则，表示前面的规则必须先匹配match_all中设置的规则才会产生匹配
 
 转发到服务器的ssr
 ssr {
@@ -95,11 +108,35 @@ v2ws {
 
 ip转发
 ipForward {
-     destAddr = 127.0.0.1:8081;
+    destAddr = 127.0.0.1:8081;
 
-     //来自6.6开头的ip转发到127.0.0.1:8081
-     src_ip = 6.6/16;
+    //读取客户端数据前先进行匹配
+    firstMatch = on; 
 
-     //原始目标ip是8.8开头的ip转发到127.0.0.1:8081
-     dst_ip = 8.8/16;
+    //来自6.6开头的ip转发到127.0.0.1:8081
+    src_ip = 6.6/16;
+
+    //原始目标ip是8.8开头的ip转发到127.0.0.1:8081
+    dst_ip = 8.8/16;
+
+    //ssh端口
+    dst_port = 22;
+
+    //匹配80到85端口以外的端口
+    dst_port != 80:85;
+}
+
+//GET POST转发到代理服务器
+local_redirect {
+    destAddr = x.x.x.x:888;
+    method = GET;
+    method = POST;
+}
+//意思是先判断是不是8080端口
+//如果是8080端口则匹配local_redirect里的规则
+//如果匹配成功则连接到x.x.x x:7777
+local_redirect2 {
+    destAddr = x.x.x.x:7777;
+    include_module = local_redirect;
+    match_all: dst_port = 8080;
 }

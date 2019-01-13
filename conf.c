@@ -9,7 +9,7 @@
 #include "acl.h"
 
 /* 字符串预处理，设置转义字符 */
-void string_pretreatment(char *str) {
+static void string_pretreatment(char *str) {
     char *p,
         *ori_strs[] = {"\\r", "\\n", "\\b", "\\v", "\\f", "\\t", "\\a", "\\b"},
         to_chrs[] = {'\r', '\n', '\b', '\v', '\f', '\t', '\a', '\b'};
@@ -25,11 +25,24 @@ void string_pretreatment(char *str) {
 
 /* 跳过空白字符 */
 char *skipBlank(char *str) {
-    while (*str == ' ' || *str == '\t' || *str == '\r' || *str == '\n' || *str == '\v' || *str == '\f' || *str == '\a' || *str == '\b' || *str == '\0')
+    while (*str == ' ' || *str == '\t' || *str == '\r' || *str == '\n')
         str++;
     if (*str == '\0')
         return NULL;
     return str;
+}
+
+static acl_module_t *aclModule_lookup(char *module_name) {
+    acl_module_t *acl_p;
+
+    for (acl_p = firstMatch_acl_list; acl_p; acl_p = acl_p->next)
+        if (!strcmp(module_name, acl_p->module_name))
+            return acl_p;
+    for (acl_p = acl_list; acl_p; acl_p = acl_p->next)
+        if (!strcmp(module_name, acl_p->module_name))
+            return acl_p;
+
+    return NULL;
 }
 
 /* 字符串转换为网络传输单位 */
@@ -61,22 +74,46 @@ static long long strToNet(char *speedStr) {
 static int addAcl(char *line, acl_module_t *acl) {
     struct acl_child *aclChi;
     char *key, *value, *p;
-    
+
     value = strchr(line, '=');
     if (!value)
-        goto error;
+        goto file_error;
     if (!strncasecmp(line, "destAddr", 8)) {
         char *ip, *port;
         if ((ip = skipBlank(value+1)) == NULL || (port = strchr(ip, ':')) == NULL)
-            goto error;
+            goto file_error;
         *port++ = '\0';
         acl->dstAddr.sin_addr.s_addr = inet_addr(ip);
         acl->dstAddr.sin_port = htons(atoi(port));
         acl->dstAddr.sin_family = AF_INET;
+    } else if (!strncasecmp(line, "matchMode", 9)) {
+        if ((value = skipBlank(value+1)) == NULL)
+            goto file_error;
+        if (!strcasecmp(value, "firstMatch")) {
+            acl_list = acl_list->next;
+            acl->next = firstMatch_acl_list;
+            firstMatch_acl_list = acl;
+        } else if (!strcasecmp(value, "only_reMatch")) {
+            acl->only_reMatch = 1;
+        }
+    } else if (!strncasecmp(line, "reMatch", 7)) {
+        if ((value = skipBlank(value+1)) == NULL || (acl->reMatch_acl = aclModule_lookup(value)) == NULL)
+            goto file_error;
     } else if (!strncasecmp(line, "timeout", 7)) {
         if ((value = skipBlank(value+1)) == NULL)
-            goto error;
-        acl->timeout_seconds = atoi(value) * 1000;
+            goto file_error;
+        acl->timeout_ms = atoi(value) * 1000;
+    } else if (!strncasecmp(line, "maxData", 7)) {
+        acl->isUseLimitMaxData = 1;
+        acl->maxDataSize = strToNet(value);
+    } else if (!strncasecmp(line, "maxSpeed", 8)) {
+        isUseLimitSpeed = 1;
+        acl->maxSpeed = strToNet(value);
+    } else if (!strncasecmp(line, "tunnel_proxy", 11)) {
+        if ((value = skipBlank(value+1)) == NULL)
+            goto file_error;
+        if (!strcasecmp(value, "on"))
+            acl->tunnel_proxy = 1;
     } else {
         aclChi = (struct acl_child *)calloc(1, sizeof(struct acl_child));
         if (!aclChi) {
@@ -87,18 +124,18 @@ static int addAcl(char *line, acl_module_t *acl) {
         acl->acl_child_list = aclChi;
         if (!strncasecmp(line, "match_all:", 10)) {
             if ((line = skipBlank(line+10)) == NULL)
-                goto error;
+                goto file_error;
             aclChi->match_all = 1;
         }
         if (*(value-1) == '!')
             aclChi->negation = 1;
         if ((value = skipBlank(value+1)) == NULL)
-            goto error;
+            goto file_error;
         if (!strncasecmp(line, "hdr(", 4)) {
             key = line + 4;
             p = strchr(key, ')');
             if (!p)
-                goto error;
+                goto file_error;
             *p = '\0';
             aclChi->key_len = p - key;
             aclChi->key = strndup(key, aclChi->key_len);
@@ -110,18 +147,18 @@ static int addAcl(char *line, acl_module_t *acl) {
             aclChi->type = HDR;
         } else if (!strncasecmp(line, "ur", 2) || !strncasecmp(line, "method", 6) || !strncasecmp(line, "string", 6)) {
             switch (*line) {
-                case 'm':
+                case 'm':  //mnethod
                     aclChi->method = strdup(value);
                     if (!aclChi->method)
-                        goto error;
+                        goto file_error;
                     aclChi->type = METHOD;
                 break;
-                
-                case 's':
+
+                case 's':  //string
                     string_pretreatment(value);
                     aclChi->type = STRING;
                 break;
-                
+
                 default:
                     *(line+2) == 'i' ? (aclChi->type = URI) : (aclChi->type = URL);
                 break;
@@ -132,7 +169,7 @@ static int addAcl(char *line, acl_module_t *acl) {
         } else if (!strncasecmp(line, "src_ip", 6) || !strncasecmp(line, "dst_ip", 6)) {
             char *ip;
             int i;
-            
+
             ip = (char *)&aclChi->ip;
             memset(ip, 0, sizeof(int32_t));
             for (p = value, i = 3; p && i >= 0; p = strchr(p, '.'), i--) {
@@ -147,34 +184,39 @@ static int addAcl(char *line, acl_module_t *acl) {
                 aclChi->ip_bit_len = 32;
             }
             *line == 's' ? (aclChi->type = SRC_IP) : (aclChi->type = DST_IP);
-        } else if (!strncasecmp(line, "maxData", 7)) {
-            acl->isUseLimitMaxData = 1;
-            acl->maxDataSize = strToNet(value);
-        } else if (!strncasecmp(line, "maxSpeed", 8)) {
-            isUseLimitSpeed = 1;
-            acl->maxSpeed = strToNet(value);
+        } else if (!strncasecmp(line, "dst_port", 8)) {
+            aclChi->dstPort_min = (unsigned short)atoi(value);
+            if ((p = strchr(value, ':')))
+                aclChi->dstPort_max = (unsigned short)atoi(p+1);
+            else
+                aclChi->dstPort_max = aclChi->dstPort_min;
+            aclChi->type = DST_PORT;
+        } else if (!strncasecmp(line, "include_module", 14)) {
+            if ((aclChi->includeModule_acl = (void *)aclModule_lookup(value)) == NULL)
+                goto file_error;
+            aclChi->type = INCLUDE_MODULE;
         } else {
-            goto error;
+            goto file_error;
         }
     }
-    
+
     return 0;
-    error:
+    file_error:
     fprintf(stderr, "error line: [%s]\n", line);
     return 1;
 }
 
 /* 读取全局模块 */
-static int readGlobal(char *line) {
+static int parseGlobal(char *line) {
     char *value;
-    
+
     value = strchr(line, '=');
     if (!value || (value = skipBlank(value+1)) == NULL)
-        goto error;
+        goto file_error;
     if (!strncasecmp(line, "listen", 6)) {
         char *port;
         if ((port = strchr(value, ':')) == NULL)
-            goto error;
+            goto file_error;
         *port++ = '\0';
         listenFd = create_listen(value, atoi(port));
         if (listenFd < 0)
@@ -182,11 +224,11 @@ static int readGlobal(char *line) {
     } else if (!strncasecmp(line, "destAddr", 8)) {
         char *port;
         if ((port = strchr(value, ':')) == NULL)
-            goto error;
+            goto file_error;
         *port++ = '\0';
-        defDstAddr.sin_addr.s_addr = inet_addr(value);
-        defDstAddr.sin_port = htons(atoi(port));
-        defDstAddr.sin_family = AF_INET;
+        globalAcl.dstAddr.sin_addr.s_addr = inet_addr(value);
+        globalAcl.dstAddr.sin_port = htons(atoi(port));
+        globalAcl.dstAddr.sin_family = AF_INET;
     } else if (!strncasecmp(line, "pid_path", 8)) {
         pid_path = strdup(value);
         if (pid_path == NULL) {
@@ -197,92 +239,94 @@ static int readGlobal(char *line) {
     } else if (!strncasecmp(line, "uid", 3)) {
         if (setgid(atoi(value)) || setuid(atoi(value))) {
             perror("setgid(or setuid)()");
-            goto error;
+            goto file_error;
         }
     } else if (!strncasecmp(line, "procs", 5)) {
         worker_proc = atoi(value);
-    } else if (!strncasecmp(line, "timeout", 7)) {
-        globalAcl.timeout_seconds = atoi(value) * 1000;
-    } else if (!strncasecmp(line, "thread_pool_size", 16)) {
-        thread_pool_size = atoi(value);
-    } else if (!strncasecmp(line, "maxData", 7)) {
-        globalAcl.isUseLimitMaxData = 1;
-        globalAcl.maxDataSize = strToNet(value);
-    } else if (!strncasecmp(line, "maxSpeed", 8)) {
-        isUseLimitSpeed = 1;
-        globalAcl.maxSpeed= strToNet(value);
+    } else if (!addAcl(line, &globalAcl)) {
+        return 1;
     } else {
-        goto error;
+        goto file_error;
     }
-    
+
     return 0;
-    error:
+    file_error:
     fprintf(stderr, "error line: [%s]\n", line);
     return 1;
 }
 
-/* 读取模块 */
-static int readArea(char *content, acl_module_t *acl) {
-    char *lineBegin, *lineEnd = NULL;
-    
+/* 读取模块中的一行，交给其他函数解析该行，执行正常返回处理内容的长度，失败返回-1 */
+static int parseArea(char *content, acl_module_t *acl) {
+    char *lineBegin = NULL, *lineEnd = NULL;
+
     for (lineBegin = strchr(content, '\n'); lineBegin; lineBegin = lineEnd) {
         if ((lineBegin = skipBlank(lineBegin)) == NULL)
-            return 1;
+            return -1;
         else if (strncmp(lineBegin, "//", 2) == 0)
         {
             lineEnd = strchr(lineBegin, '\n');
             continue;
         }
         else if (*lineBegin == '}')
-            return 0;
+            break;
         if ((lineEnd = strchr(lineBegin, '\n')) != NULL) {
             if (*(lineEnd - 1) == ';')  //;作为一行的结束字符
                 *(lineEnd++ - 1) = '\0';  //指向下一行
             else
                 *lineEnd++ = '\0';
         }
-        if (acl == NULL) {
-            if (readGlobal(lineBegin) != 0)
-                return 0;
+        if (acl == &globalAcl) {
+            if (parseGlobal(lineBegin) != 0)
+                break;
         } else if (addAcl(lineBegin, acl) != 0) {
-            return 1;
+            return -1;
         }
     }
-    
-    return 0;
+
+    //处理正常返回处理内容的长度
+    return lineEnd ? (lineEnd - content) : (lineBegin ? (lineBegin - content) : 0);
 }
 
-/* 解析配置文件 */
+/* 解析配置文件，得到模块名和模块内容的开始位置，传给其他函数处理 */
 static int parseConfig(char *buff) {
     acl_module_t *acl;
-    char *p, *p0;
-    int firstRead;
-    
-    firstRead = 1;
-    acl = NULL;
-    for (p = buff; ; p = p0 + 1) {
-        while (*p != '\0' && *p != '{')
-            p++;
-        if (*p == '\0')
+    char *moduleName, *moduleName_end, *module_start, *p;
+    int handle_len;
+
+    moduleName = buff;
+    while ((module_start = strchr(moduleName, '{')) != NULL) {
+        *module_start++ = '\0';
+        if ((p = strrchr(moduleName, '\n')) != NULL && (p = skipBlank(p)) != NULL)
+            moduleName = p;
+        for (moduleName_end = moduleName+1; *moduleName_end != ' ' && *moduleName_end != '\t' && *moduleName_end != '\n' && *moduleName_end != '\r' && *moduleName_end != '\0'; moduleName_end++);
+        if (*moduleName_end == '\0')
             return 0;
-        if ((p0 = strchr(++p, '}')) == NULL)
-            return 1;
-        if (firstRead == 0) {
+        if (!strncasecmp(moduleName, "global", 6)) {
+            if ((handle_len = parseArea(module_start, &globalAcl)) == -1)
+                return 1;
+        } else {
             acl = (acl_module_t *)malloc(sizeof(acl_module_t));
             if (!acl) {
-                perror("calloc()");
+                perror("malloc()");
                 return 1;
             }
+            memcpy(acl, &globalAcl, sizeof(acl_module_t));
             acl->next = acl_list;
             acl_list = acl;
-            memcpy(acl, &globalAcl, sizeof(acl_module_t));
-        } else {
-            firstRead = 0;
+            acl->module_name = strndup(moduleName, moduleName_end - moduleName);
+            if (!acl->module_name) {
+                perror("strndup()");
+                return 1;
+            }
+            if ((handle_len = parseArea(module_start, acl)) == -1)
+                return 1;
         }
-        if (readArea(p, acl) != 0)
-            return 1;
+        moduleName = strchr(module_start + handle_len,'}');
+        if (!moduleName)
+            return 0;
+        moduleName++;
     }
-    
+
     return 0;
 }
 
