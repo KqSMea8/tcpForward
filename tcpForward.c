@@ -22,9 +22,9 @@
 #define DEFAULT_THREAD_POOL_SIZE 30
 
 static struct clientConn publicConn;  //主线程设置该变量，子线程复制
-static pthread_mutex_t condMutex, cpMutex;
+static pthread_mutex_t condMutex;
 static pthread_cond_t thCond;
-static int *thPool_isBusy;  //线程执行繁忙值为1，空闲值为0
+static pthread_t master_thId;  //主线程的线程id
 char *pid_path;
 int listenFd, worker_proc, thread_pool_size, isUseLimitSpeed /* 判断是否使用限制网速功能 */;
 acl_module_t globalAcl;
@@ -138,9 +138,8 @@ void *new_connection(void *nullPtr) {
     struct clientConn client;
     acl_module_t *matchAcl;
 
-    pthread_mutex_lock(&cpMutex);
     memcpy(&client, &publicConn, sizeof(struct clientConn));
-    pthread_mutex_unlock(&cpMutex);
+    pthread_kill(master_thId, SIGUSR1);  //表示复制完publicConn的内存
     if ((matchAcl = first_match_acl_module(&client, firstMatch_acl_list, -1)) == NULL) {
         if (read_first_data(&client) != 0)
             goto forwardEnd;
@@ -213,7 +212,9 @@ void *pool_wait_task(void *intPtr) {
 void server_start() {
     pthread_t th_id;
     pthread_attr_t attr;
-    int i;
+    sigset_t sig;
+    int *thPool_isBusy,  //线程执行繁忙值为1，空闲值为0
+        i, signum;
 
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
@@ -225,11 +226,15 @@ void server_start() {
         perror("calloc()");
         return;
     }
-    pthread_mutex_init(&cpMutex, NULL);
     pthread_mutex_init(&condMutex, NULL);
     pthread_cond_init(&thCond, NULL);
     for (i = 0; i < thread_pool_size; i++)
         pthread_create(&th_id, &attr, &pool_wait_task, (void *)(thPool_isBusy + i));
+    /* 初始化信号设置，用于子线程告诉主线程内存已经拷贝完毕 */
+    sigemptyset(&sig);
+    sigaddset(&sig, SIGUSR1);
+    pthread_sigmask(SIG_BLOCK, &sig, NULL);
+    master_thId = pthread_self();
     /* 开始监控新客户端 */
     while (1) {
         if (accept_client() != 0) {
@@ -250,6 +255,7 @@ void server_start() {
                 continue;
             }
         }
+        sigwait(&sig, &signum);
     }
 }
 

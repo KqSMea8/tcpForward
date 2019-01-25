@@ -25,7 +25,7 @@ static void string_pretreatment(char *str) {
 
 /* 跳过空白字符 */
 char *skipBlank(char *str) {
-    while (*str == ' ' || *str == '\t' || *str == '\r' || *str == '\n' || *str == '\v' || *str == '\f' || *str == '\a' || *str == '\b')
+    while (*str == ' ' || *str == '\t' || *str == '\r' || *str == '\n')
         str++;
     if (*str == '\0')
         return NULL;

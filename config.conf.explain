@@ -2,20 +2,11 @@
 注释为//开头
 
 global模块为全局配置
-    关键字(不区分大小写): listen procs uid pid_path timeout    [thread_pool_size = number]，线程池大小，首先创建number个线程等待处理客户端，当没有空闲线程再创建新线程处理，默认30个线程
-    [timeout = timeout_second]，超时时间，每个模块只能有一个，单位：秒，默认-1不超时
-
-    设置各模块的默认配置: destAddr maxSpeed maxData
-    [destAddr = ip:port]，转发的地址，每个模块只能有一个，0开头则使用原始目标地址
-    [maxSpeed = speedNumber]，单进程限制每秒最大网速，每个模块只能有一个，默认0不限速
-    [maxData = maxForwardDataNumber]，单进程限制最大传输流量，每个模块只能有一个，默认-1不限量
-    [tunnel_proxy = on]，使用隧道代理(CONNECT)
+    关键字(不区分大小写): listen procs uid pid_path thread_pool_size
+    [thread_pool_size = number]，线程池大小，首先创建number个线程等待处理客户端，当没有空闲线程再创建新线程处理，默认30个线程
 global {
     //监听地址
     listen = 0.0.0.0:80;
-
-    //默认转发地址，这里的ip是0开头，使用客户端的原始地址
-    destaddr = 0.0.0.0:69;
 
     //进程数
     //procs = 2;
@@ -28,22 +19,15 @@ global {
 
     //线程池大小
     //thread_pool_size = 35;
-
-    //默认超时时间
-    timeout = 60;
-
-    //默认每秒最大网速
-    //maxSpeed = 5M;
-
-    //默认限制最大流量
-    //maxData = 10g;
-    
-    //默认使用CONNECT代理
-    //tunnel_proxy =on;
 }
 
 自定义模块:
     配置关键字(不区分大小写): destAddr tunnel_proxy include_module maxSpeed maxData matchMode timeout reMatch
+    [timeout = timeout_second]，超时时间，每个模块只能有一个，单位：秒，默认-1不超时
+    [destAddr = ip:port]，转发的地址，每个模块只能有一个，0开头则使用原始目标地址
+    [maxSpeed = speedNumber]，单进程限制每秒最大网速，每个模块只能有一个，默认0不限速
+    [maxData = maxForwardDataNumber]，单进程限制最大传输流量，每个模块只能有一个，默认-1不限量
+    [tunnel_proxy = on]，使用隧道代理(CONNECT)
     [reMatch = module_name]，重新匹配一次module_name模块里的规则，匹配成功后使用重新匹配的配置，否则不改变已成功匹配的模块配置，需要module_name模块已经创建
     [matchMode = [firstMatch/only_reMatch]，firstMatch: 读取客户端前先进行匹配(有些连接是先获取服务端数据才能上网)，只支持src_ip dst_ip dst_port match_all:语法；only_reMatch: 只有在其他模块指定reMatch时匹配，没有模块指定则不进行匹配
     [include_module = module_name]，跳转到module_name模块的规则进行匹配，需要module_name模块已经创建
@@ -59,6 +43,10 @@ global {
     [dst_port [!]= port[:port]]，客户端的原始目标端口，连续端口用:连接，一般用于本机主机通过iptables重定向
     [src_ip [!]= ip]，客户端的来源ip，一般用于云主机
     [match_all: hdr() | string | uri | url | src_ip | dst_ip | dst_port = value] ，match_all后面接一个匹配规则，表示前面的规则必须先匹配match_all中设置的规则才会产生匹配
+
+
+自定义模块的关键字可以写到global模块，然后自定义模块的默认值为global模块指定的值
+
 
 转发到服务器的ssr
 ssr {
@@ -76,6 +64,15 @@ ssr {
 
     //限制该模块的网速为3m/s
     maxSpeed = 3m;
+    
+    //超时时间60s
+    timeout = 60;
+
+    //限制最大流量
+    //maxData = 10g;
+    
+    //默认使用CONNECT代理
+    //tunnel_proxy =on;
 }
 
 转发到服务器的httpDNS
@@ -111,7 +108,7 @@ ipForward {
     destAddr = 127.0.0.1:8081;
 
     //读取客户端数据前先进行匹配
-    firstMatch = on; 
+    matchMode = firstMatch; 
 
     //来自6.6开头的ip转发到127.0.0.1:8081
     src_ip = 6.6/16;
